@@ -1,0 +1,23 @@
+{
+  "name": "business-requirement-management-system",
+  "private": true,
+  "scripts": {
+    "start": "node server.js",
+    "start:demo": "BRMS_DEMO_AUTH=1 node server.js",
+    "api": "node server.js",
+    "seed:archive-demo": "node scripts/seed-archive-demo.js",
+    "seed:workflow-statuses": "node scripts/seed-workflow-statuses.js",
+    "migrate:requirement-sources": "node scripts/migrate-requirement-sources.js",
+    "migrate:project-ids": "node scripts/migrate-project-ids.js",
+    "check": "node --check server.js && node --check app.js && node --check data-access.js && node --check time-format.js && node --check wang-editor-adapter.js && node --check scripts/seed-archive-demo.js && node --check scripts/seed-workflow-statuses.js && node --check scripts/migrate-project-ids.js && node --check scripts/migrate-requirement-sources.js && node --check test/api.integration.test.js",
+    "test": "node --test test/api.integration.test.js"
+  },
+  "engines": {
+    "node": ">=22.5.0"
+  },
+  "dependencies": {
+    "@wangeditor/editor": "^5.1.23",
+    "pinyin-pro": "^3.27.0",
+    "sanitize-html": "^2.17.0"
+  }
+}

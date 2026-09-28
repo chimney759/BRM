@@ -1,0 +1,6 @@
+node_modules/
+.DS_Store
+data/*.sqlite
+data/*.sqlite-*
+data/uploads/
+.snapshots/
