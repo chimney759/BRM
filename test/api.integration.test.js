@@ -727,3 +727,58 @@ test('quick release atomically publishes selected implemented requirements for o
   assert.equal(empty.response.status, 422);
   assert.equal(empty.payload.code, 'VALIDATION_ERROR');
 });
+
+test('session login gates business APIs, supports password changes, logout, and lockout', async () => {
+  const authPort = port + 1;
+  const authDatabasePath = path.join(os.tmpdir(), `brms-auth-test-${process.pid}.sqlite`);
+  const authUploadPath = path.join(os.tmpdir(), `brms-auth-test-uploads-${process.pid}`);
+  fs.rmSync(authDatabasePath, { force: true });
+  fs.rmSync(authUploadPath, { recursive: true, force: true });
+  const authServer = spawn(process.execPath, ['server.js'], {
+    cwd: root,
+    env: { ...process.env, BRMS_API_PORT: String(authPort), BRMS_DB_PATH: authDatabasePath, BRMS_UPLOAD_DIR: authUploadPath },
+    stdio: 'ignore'
+  });
+  const authRequest = async (pathname, options = {}) => {
+    const response = await fetch(`http://127.0.0.1:${authPort}${pathname}`, {
+      headers: { 'Content-Type': 'application/json', ...(options.headers || {}) },
+      ...options
+    });
+    return { response, payload: response.status === 204 ? null : await response.json() };
+  };
+  try {
+    for (let attempt = 0; attempt < 40; attempt += 1) {
+      try { if ((await fetch(`http://127.0.0.1:${authPort}/api/health`)).ok) break; } catch {}
+      await new Promise((resolve) => setTimeout(resolve, 100));
+      if (attempt === 39) throw new Error('Authentication API did not become ready');
+    }
+    const denied = await authRequest('/api/me');
+    assert.equal(denied.response.status, 401);
+    assert.equal(denied.payload.code, 'UNAUTHENTICATED');
+
+    const login = await authRequest('/api/auth/login', { method: 'POST', body: JSON.stringify({ name: '王敏', password: 'BRMS@2026' }) });
+    assert.equal(login.response.status, 200);
+    const cookie = login.response.headers.get('set-cookie').split(';')[0];
+    assert.match(cookie, /^brms_session=/);
+    assert.equal((await authRequest('/api/me', { headers: { Cookie: cookie } })).response.status, 200);
+
+    const changed = await authRequest('/api/auth/change-password', { method: 'POST', headers: { Cookie: cookie }, body: JSON.stringify({ currentPassword: 'BRMS@2026', newPassword: 'Changed@2026' }) });
+    assert.equal(changed.response.status, 200);
+    const changedCookie = changed.response.headers.get('set-cookie').split(';')[0];
+    assert.equal((await authRequest('/api/me', { headers: { Cookie: cookie } })).response.status, 401);
+    assert.equal((await authRequest('/api/me', { headers: { Cookie: changedCookie } })).response.status, 200);
+    assert.equal((await authRequest('/api/auth/logout', { method: 'POST', headers: { Cookie: changedCookie } })).response.status, 204);
+    assert.equal((await authRequest('/api/me', { headers: { Cookie: changedCookie } })).response.status, 401);
+
+    for (let attempt = 0; attempt < 4; attempt += 1) {
+      assert.equal((await authRequest('/api/auth/login', { method: 'POST', body: JSON.stringify({ name: '赵宁', password: 'wrong-password' }) })).response.status, 401);
+    }
+    const locked = await authRequest('/api/auth/login', { method: 'POST', body: JSON.stringify({ name: '赵宁', password: 'wrong-password' }) });
+    assert.equal(locked.response.status, 429);
+    assert.equal(locked.payload.message, '请联系系统管理员重置密码，或5分钟后再次尝试。');
+  } finally {
+    authServer.kill();
+    fs.rmSync(authDatabasePath, { force: true });
+    fs.rmSync(authUploadPath, { recursive: true, force: true });
+  }
+});

@@ -3,13 +3,15 @@
   "private": true,
   "scripts": {
     "start": "node server.js",
-    "start:demo": "BRMS_DEMO_AUTH=1 node server.js",
     "api": "node server.js",
     "seed:archive-demo": "node scripts/seed-archive-demo.js",
     "seed:workflow-statuses": "node scripts/seed-workflow-statuses.js",
+    "deploy:clear-users": "node scripts/clear-users-for-deployment.js",
+    "deploy:clear-requirements": "node scripts/clear-requirements-for-deployment.js",
+    "deploy:provision-accounts": "node scripts/provision-deployment-accounts.js",
     "migrate:requirement-sources": "node scripts/migrate-requirement-sources.js",
     "migrate:project-ids": "node scripts/migrate-project-ids.js",
-    "check": "node --check server.js && node --check app.js && node --check data-access.js && node --check time-format.js && node --check wang-editor-adapter.js && node --check scripts/seed-archive-demo.js && node --check scripts/seed-workflow-statuses.js && node --check scripts/migrate-project-ids.js && node --check scripts/migrate-requirement-sources.js && node --check test/api.integration.test.js",
+    "check": "node --check server.js && node --check app.js && node --check data-access.js && node --check auth-ui.js && node --check time-format.js && node --check wang-editor-adapter.js && node --check scripts/clear-users-for-deployment.js && node --check scripts/clear-requirements-for-deployment.js && node --check scripts/provision-deployment-accounts.js && node --check scripts/seed-archive-demo.js && node --check scripts/seed-workflow-statuses.js && node --check scripts/migrate-project-ids.js && node --check scripts/migrate-requirement-sources.js && node --check test/api.integration.test.js",
     "test": "node --test test/api.integration.test.js"
   },
   "engines": {

@@ -4,18 +4,20 @@
     apiBaseUrl: String(window.BRMS_CONFIG?.apiBaseUrl || '/api').replace(/\/$/, ''),
     localAuth: window.BRMS_CONFIG?.localAuth === true
   });
+  let demoIdentityEnabled = false;
   const unwrap = (payload) => payload?.data ?? payload;
   const normalizeError = async (response) => {
     const body = await response.json().catch(() => ({}));
     const error = new Error(body.message || `请求失败（${response.status}）`);
     error.code = body.code || (response.status === 401 ? 'UNAUTHENTICATED' : response.status === 403 ? 'FORBIDDEN' : 'REQUEST_FAILED');
     error.details = body.details;
+    if (error.code === 'UNAUTHENTICATED') window.dispatchEvent(new CustomEvent('brms:unauthenticated'));
     throw error;
   };
   const request = async (path, options = {}) => {
     const response = await fetch(`${config.apiBaseUrl}${path}`, {
-      credentials: config.localAuth ? 'omit' : 'include',
-      headers: { Accept: 'application/json', ...(config.localAuth ? { 'X-BRMS-Demo-Role': localStorage.getItem('brms-local-api-role') || 'requester', ...(localStorage.getItem('brms-local-api-user-id') ? { 'X-BRMS-Demo-User-Id': localStorage.getItem('brms-local-api-user-id') } : {}) } : {}), ...(options.body ? { 'Content-Type': 'application/json' } : {}), ...(options.headers || {}) },
+      credentials: 'include',
+      headers: { Accept: 'application/json', ...(demoIdentityEnabled ? { 'X-BRMS-Demo-Role': localStorage.getItem('brms-local-api-role') || 'requester', ...(localStorage.getItem('brms-local-api-user-id') ? { 'X-BRMS-Demo-User-Id': localStorage.getItem('brms-local-api-user-id') } : {}) } : {}), ...(options.body ? { 'Content-Type': 'application/json' } : {}), ...(options.headers || {}) },
       ...options
     });
     if (!response.ok) return normalizeError(response);
@@ -65,7 +67,7 @@
     messages: { async list(filters = {}) { return listData(await request(`/messages${query(filters)}`)); } },
     activities: { async list(filters = {}) { return listData(await request(`/requirement-activities${query(filters)}`)); }, async markRead(requirementId) { return request(`/requirement-activities/${encodeURIComponent(requirementId)}/read`, { method: 'POST' }); }, async markAllRead() { return request('/requirement-activities/read-all', { method: 'POST' }); } },
     archives: { async list(filters = {}) { return request(`/archives${query(filters)}`); } },
-    auth: { async user() { return request('/me'); }, async set(role, userId = '') { if (!config.localAuth) throw Error('生产环境的身份由企业登录服务决定，不能在浏览器切换'); localStorage.setItem('brms-local-api-role', role); if (userId) localStorage.setItem('brms-local-api-user-id', userId); else localStorage.removeItem('brms-local-api-user-id'); } }
+    auth: { async user() { const user = await request('/me'); demoIdentityEnabled = user.canUseDemoIdentity === true; if (!demoIdentityEnabled) { localStorage.removeItem('brms-local-api-role'); localStorage.removeItem('brms-local-api-user-id'); } return user; }, async login(name, password) { return request('/auth/login', { method: 'POST', body: JSON.stringify({ name, password }) }); }, async logout() { return request('/auth/logout', { method: 'POST' }); }, async changePassword(currentPassword, newPassword) { return request('/auth/change-password', { method: 'POST', body: JSON.stringify({ currentPassword, newPassword }) }); }, async set(role, userId = '') { if (!demoIdentityEnabled) throw Error('当前账号无权使用演示身份'); localStorage.setItem('brms-local-api-role', role); if (userId) localStorage.setItem('brms-local-api-user-id', userId); else localStorage.removeItem('brms-local-api-user-id'); } }
   };
-  window.BRMS = Object.freeze({ mode: config.mode, config, repo: http, isLocal: false, localRoleSwitch: config.localAuth });
+  window.BRMS = Object.freeze({ mode: config.mode, config, repo: http, isLocal: false, get localRoleSwitch() { return demoIdentityEnabled; } });
 })();

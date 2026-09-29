@@ -5,5 +5,5 @@ window.BRMS_CONFIG = {
   // Same-origin API keeps local ports, staging, and production deployments aligned.
   apiBaseUrl: '/api',
   // Browser role simulation is development-only and must be explicitly enabled.
-  localAuth: true
+  localAuth: false
 };

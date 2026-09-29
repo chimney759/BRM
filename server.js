@@ -10,9 +10,7 @@ const { legacyProjectIds, migrateLegacyProjectIds } = require('./scripts/migrate
 
 const host = process.env.BRMS_HOST || '127.0.0.1';
 const port = Number(process.env.BRMS_API_PORT || 3000);
-// The checked-in browser configuration enables local role simulation. Keep the
-// local server aligned by default; deployments can explicitly disable it.
-const demoAuthEnabled = process.env.BRMS_DEMO_AUTH !== '0';
+const demoIdentityUserName = '测试专用999';
 const dataDir = path.join(__dirname, 'data');
 fs.mkdirSync(dataDir, { recursive: true });
 const uploadDir = path.resolve(process.env.BRMS_UPLOAD_DIR || path.join(dataDir, 'uploads'));
@@ -29,10 +27,12 @@ CREATE TABLE IF NOT EXISTS requirements (id TEXT PRIMARY KEY, code TEXT NOT NULL
 CREATE TABLE IF NOT EXISTS requirement_histories (id TEXT PRIMARY KEY, requirement_id TEXT NOT NULL REFERENCES requirements(id) ON DELETE CASCADE, payload TEXT NOT NULL, created_at TEXT NOT NULL);
 CREATE TABLE IF NOT EXISTS rich_text_assets (url TEXT PRIMARY KEY, filename TEXT NOT NULL UNIQUE, uploaded_by TEXT NOT NULL, requirement_id TEXT REFERENCES requirements(id), created_at TEXT NOT NULL, claimed_at TEXT NOT NULL DEFAULT '');
 CREATE TABLE IF NOT EXISTS messages (id TEXT PRIMARY KEY, recipient_id TEXT NOT NULL REFERENCES users(id), requirement_id TEXT NOT NULL REFERENCES requirements(id) ON DELETE CASCADE, type TEXT NOT NULL, payload TEXT NOT NULL, created_at TEXT NOT NULL, read_at TEXT NOT NULL DEFAULT '');
+CREATE TABLE IF NOT EXISTS sessions (id TEXT PRIMARY KEY, user_id TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE, token_hash TEXT NOT NULL UNIQUE, expires_at TEXT NOT NULL, created_at TEXT NOT NULL);
 CREATE INDEX IF NOT EXISTS requirements_lookup ON requirements(project_id, status, updated_at);
 CREATE INDEX IF NOT EXISTS histories_lookup ON requirement_histories(requirement_id, created_at DESC);
 CREATE INDEX IF NOT EXISTS rich_text_assets_requirement_lookup ON rich_text_assets(requirement_id);
 CREATE INDEX IF NOT EXISTS messages_recipient_lookup ON messages(recipient_id, created_at DESC);
+CREATE INDEX IF NOT EXISTS sessions_token_lookup ON sessions(token_hash);
 `);
 const userColumns = db.prepare('PRAGMA table_info(users)').all().map((column) => column.name);
 if (!userColumns.includes('name_normalized')) {
@@ -45,6 +45,9 @@ if (!userColumns.includes('roles')) {
 }
 if (!userColumns.includes('password_hash')) db.exec("ALTER TABLE users ADD COLUMN password_hash TEXT NOT NULL DEFAULT ''");
 if (!userColumns.includes('password_updated_at')) db.exec("ALTER TABLE users ADD COLUMN password_updated_at TEXT NOT NULL DEFAULT ''");
+if (!userColumns.includes('failed_login_count')) db.exec('ALTER TABLE users ADD COLUMN failed_login_count INTEGER NOT NULL DEFAULT 0');
+if (!userColumns.includes('login_locked_until')) db.exec("ALTER TABLE users ADD COLUMN login_locked_until TEXT NOT NULL DEFAULT ''");
+if (!userColumns.includes('force_password_change')) db.exec('ALTER TABLE users ADD COLUMN force_password_change INTEGER NOT NULL DEFAULT 0');
 const requirementColumns = db.prepare('PRAGMA table_info(requirements)').all().map((column) => column.name);
 if (!requirementColumns.includes('archived_at')) db.exec("ALTER TABLE requirements ADD COLUMN archived_at TEXT NOT NULL DEFAULT ''");
 
@@ -103,7 +106,45 @@ const passwordHash = (password) => {
   const salt = crypto.randomBytes(16).toString('hex');
   return `${salt}:${crypto.scryptSync(password, salt, 64).toString('hex')}`;
 };
+const verifyPassword = (password, stored) => {
+  const [salt, expected] = String(stored || '').split(':');
+  if (!salt || !expected || !/^[a-f0-9]+$/i.test(expected)) return false;
+  try {
+    const actual = crypto.scryptSync(String(password || ''), salt, 64).toString('hex');
+    const expectedBuffer = Buffer.from(expected, 'hex');
+    const actualBuffer = Buffer.from(actual, 'hex');
+    return expectedBuffer.length === actualBuffer.length && crypto.timingSafeEqual(expectedBuffer, actualBuffer);
+  } catch { return false; }
+};
 const norm = (value) => String(value || '').trim().replace(/\s+/g, ' ');
+const isDemoIdentityUser = (row) => norm(row?.name) === demoIdentityUserName;
+const bootstrapDeploymentAccounts = () => {
+  const existingUser = db.prepare('SELECT id FROM users LIMIT 1').get();
+  if (existingUser) return;
+
+  const adminPassword = process.env.BRMS_ADMIN_PASSWORD;
+  if (!adminPassword) {
+    throw Error('首次启动检测到空用户库。请设置 BRMS_ADMIN_PASSWORD 后重新启动服务。');
+  }
+
+  const createdAt = now();
+  const accounts = [
+    ['deployment-admin', 'Admin', '系统管理', '系统管理员', ['系统管理员'], adminPassword]
+  ];
+  const insert = db.prepare('INSERT INTO users(id,name,name_normalized,department,role,status,roles,password_hash,password_updated_at,failed_login_count,login_locked_until,force_password_change) VALUES (?,?,?,?,?,?,?,?,?,?,?,?)');
+  db.exec('BEGIN IMMEDIATE;');
+  try {
+    for (const [idValue, name, department, role, selectedRoles, password] of accounts) {
+      insert.run(idValue, name, name.toLowerCase(), department, role, '启用', JSON.stringify(selectedRoles), passwordHash(password), createdAt, 0, '', 1);
+    }
+    db.exec('COMMIT;');
+    console.log('已初始化部署账户：Admin。');
+  } catch (error) {
+    db.exec('ROLLBACK;');
+    throw error;
+  }
+};
+bootstrapDeploymentAccounts();
 const queryValues = (params, key) => params.getAll(key).flatMap((value) => norm(value).split(',')).filter(Boolean);
 const parse = (value) => JSON.parse(value || '{}');
 const fail = (code, message, status = 422) => { const err = new Error(message); err.code = code; err.status = status; throw err; };
@@ -140,7 +181,7 @@ const normalizedRoles = (value) => {
   if (!selected.length || selected.some((role) => !Object.values(roles).includes(role))) fail('VALIDATION_ERROR', '角色不合法');
   return selected;
 };
-const publicUser = (row) => row && ({ id: row.id, name: row.name, department: row.department, role: userRoles(row)[0] || row.role, roles: userRoles(row), status: row.status });
+const publicUser = (row) => row && ({ id: row.id, name: row.name, department: row.department, role: userRoles(row)[0] || row.role, roles: userRoles(row), status: row.status, mustChangePassword: Boolean(row.force_password_change) });
 const publicProject = (row) => row && ({ id: row.id, name: row.name, projectType: row.project_type, description: row.description, status: row.status, createdAt: row.created_at, updatedAt: row.updated_at });
 const publicVersion = (row) => row && ({ id: row.id, projectId: row.project_id, projectName: project(row.project_id)?.name || '', version: row.version, releaseDate: row.release_date, createdAt: row.created_at, updatedAt: row.updated_at });
 const getActor = (roleKey, userId) => {
@@ -151,6 +192,41 @@ const getActor = (roleKey, userId) => {
     : db.prepare("SELECT * FROM users WHERE status = '启用' ORDER BY id").all().find((item) => hasRole(item, role)) || user('u1');
   const key = Object.entries(roles).find(([, label]) => label === role)?.[0] || 'requester';
   return { ...publicUser(row), role, key };
+};
+const actorFromUser = (row) => {
+  const rolesForUser = userRoles(row);
+  const role = rolesForUser[0] || row.role;
+  const key = Object.entries(roles).find(([, label]) => label === role)?.[0] || 'requester';
+  return { ...publicUser(row), role, key };
+};
+const sessionTokenHash = (token) => crypto.createHash('sha256').update(token).digest('hex');
+const sessionDurationSeconds = 60 * 60 * 12;
+const initialPassword = process.env.BRMS_INITIAL_PASSWORD || 'BRMS@2026';
+const cookieName = 'brms_session';
+const parseCookies = (header = '') => Object.fromEntries(String(header).split(';').map((part) => {
+  const separator = part.indexOf('=');
+  return separator < 0 ? [] : [part.slice(0, separator).trim(), decodeURIComponent(part.slice(separator + 1).trim())];
+}).filter((item) => item.length));
+const sessionCookie = (token, maxAge = sessionDurationSeconds) => `${cookieName}=${encodeURIComponent(token)}; Path=/; HttpOnly; SameSite=Lax; Max-Age=${maxAge}${process.env.BRMS_COOKIE_SECURE === '1' ? '; Secure' : ''}`;
+const clearSessionCookie = () => `${cookieName}=; Path=/; HttpOnly; SameSite=Lax; Max-Age=0${process.env.BRMS_COOKIE_SECURE === '1' ? '; Secure' : ''}`;
+const createSession = (userId) => {
+  const token = crypto.randomBytes(32).toString('base64url');
+  const createdAt = now();
+  const expiresAt = new Date(Date.now() + sessionDurationSeconds * 1000).toISOString();
+  db.prepare('INSERT INTO sessions(id, user_id, token_hash, expires_at, created_at) VALUES (?, ?, ?, ?, ?)').run(id(), userId, sessionTokenHash(token), expiresAt, createdAt);
+  return token;
+};
+const sessionFromRequest = (req) => {
+  const token = parseCookies(req.headers.cookie)[cookieName];
+  if (!token) return null;
+  const session = db.prepare('SELECT * FROM sessions WHERE token_hash = ?').get(sessionTokenHash(token));
+  if (!session) return null;
+  if (new Date(session.expires_at).getTime() <= Date.now()) {
+    db.prepare('DELETE FROM sessions WHERE id = ?').run(session.id);
+    return null;
+  }
+  const row = user(session.user_id);
+  return row?.status === '启用' ? { session, row, actor: actorFromUser(row) } : null;
 };
 const requireRole = (actor, allowed) => { if (actor.role !== '系统管理员' && !allowed.includes(actor.role)) fail('FORBIDDEN', '无权限执行此操作', 403); };
 const checkUser = (value, label, must = false) => { if (!value && !must) return null; const row = user(value); if (!row || row.status !== '启用') fail('VALIDATION_ERROR', `${label}不存在或已停用`); return row; };
@@ -631,7 +707,7 @@ function quickReleaseRequirements(input, actor) {
   }));
   return { count: updated.length, version: publicVersion(versionRecord), requirements: updated };
 }
-function seed() { const userInsert=db.prepare('INSERT OR IGNORE INTO users(id, name, name_normalized, department, role, status) VALUES (?, ?, ?, ?, ?, ?)'); [['u1','王敏','运营部','业务需求方'],['u2','赵宁','增长部','业务需求质量管理员'],['u3','孙莉','商务部','业务需求方'],['u4','李欣','产品部','产品'],['u5','陈晨','产品部','产品'],['u6','周杰','技术部','研发'],['u7','系统管理员','系统管理部','系统管理员']].forEach(([userId,name,department,role])=>userInsert.run(userId,name,norm(name).toLowerCase(),department,role,'启用')); const projectInsert=db.prepare('INSERT OR IGNORE INTO projects VALUES (?, ?, ?, ?, ?, ?, ?, ?)'); presetProjects.forEach(({id:projectId,name})=>{const at=now();projectInsert.run(projectId,name,norm(name).toLowerCase(),'导购电商','','启用',at,at);}); if(!db.prepare('SELECT count(*) AS count FROM requirements').get().count){createRequirement({title:'支持抖音电商返现能力',source:'运营',projectId:legacyProjectIds.get('p2'),descriptionHtml:'<p><b>背景</b>：返现业务需要拓展抖音电商场景。</p><p><b>目标</b>：提升渠道订单转化。</p><p><b>需求</b>：支持抖音电商返现。</p>'},getActor('requester','u1'));createRequirement({title:'返还网订单列表体验优化',source:'产品',projectId:legacyProjectIds.get('p3'),descriptionHtml:'<p>优化订单状态筛选与返现到账提示。</p>'},getActor('requester','u3'));} }
+function seed() { const projectInsert=db.prepare('INSERT OR IGNORE INTO projects VALUES (?, ?, ?, ?, ?, ?, ?, ?)'); presetProjects.forEach(({id:projectId,name})=>{const at=now();projectInsert.run(projectId,name,norm(name).toLowerCase(),'导购电商','','启用',at,at);}); }
 migrateLegacyProjectIds(db);
 migrateRequesterRoleLabel();
 migrateRequirementSources();
@@ -645,7 +721,7 @@ migrateMessageLabels();
 migrateHistoryLabels();
 reconcileRichTextAssets();
 
-const respond=(res,status,data)=>{res.writeHead(status,{'Content-Type':'application/json; charset=utf-8','Cache-Control':'no-store','X-Content-Type-Options':'nosniff'});res.end(status===204?'':JSON.stringify(data));};
+const respond=(res,status,data,headers={})=>{res.writeHead(status,{'Content-Type':'application/json; charset=utf-8','Cache-Control':'no-store','X-Content-Type-Options':'nosniff',...headers});res.end(status===204?'':JSON.stringify(data));};
 const body=(req,maxBytes=1e6)=>new Promise((resolve,reject)=>{let size=0,raw='',settled=false;const rejectOnce=error=>{if(!settled){settled=true;reject(error);}};req.on('data',chunk=>{size+=chunk.length;if(size>maxBytes){rejectOnce(Object.assign(new Error('请求内容过大'),{code:'PAYLOAD_TOO_LARGE',status:413}));req.resume();return;}raw+=chunk;});req.on('end',()=>{if(settled)return;try{resolve(raw?JSON.parse(raw):{});}catch{rejectOnce(Object.assign(new Error('请求内容不是合法 JSON'),{code:'VALIDATION_ERROR'}));}});req.on('error',rejectOnce);});
 const itemId=(pathname,name)=>pathname.match(new RegExp(`^/api/${name}/([^/]+)$`));
 const staticTypes={'.css':'text/css; charset=utf-8','.html':'text/html; charset=utf-8','.js':'application/javascript; charset=utf-8','.svg':'image/svg+xml','.png':'image/png','.jpg':'image/jpeg','.jpeg':'image/jpeg','.webp':'image/webp','.gif':'image/gif','.ico':'image/x-icon'};
@@ -695,8 +771,41 @@ function serveStatic(req,res,pathname) {
   if (req.method !== 'HEAD') res.end(body); else res.end();
   return true;
 }
-const server=http.createServer(async(req,res)=>{const url=new URL(req.url,`http://${host}:${port}`),actor=getActor(demoAuthEnabled?req.headers['x-brms-demo-role']:undefined,demoAuthEnabled?req.headers['x-brms-demo-user-id']:undefined),{pathname}=url;if(!pathname.startsWith('/api/')&&serveStatic(req,res,pathname))return;try{
-  if(req.method==='GET'&&pathname==='/api/health')return respond(res,200,{status:'ok',database:'sqlite',at:now()}); if(req.method==='GET'&&pathname==='/api/me')return respond(res,200,{id:actor.id,name:actor.name,role:actor.key,label:actor.role,roles:actor.roles,permissions:['requirements:read']});
+const server=http.createServer(async(req,res)=>{const url=new URL(req.url,`http://${host}:${port}`),{pathname}=url;if(!pathname.startsWith('/api/')&&serveStatic(req,res,pathname))return;try{
+  if(req.method==='GET'&&pathname==='/api/health')return respond(res,200,{status:'ok',database:'sqlite',at:now()});
+  if(req.method==='POST'&&pathname==='/api/auth/login'){
+    const input=await body(req),name=norm(input.name),password=String(input.password||''),row=name&&db.prepare('SELECT * FROM users WHERE name_normalized = ?').get(name.toLowerCase());
+    if(!row||row.status!=='启用'||!password) fail('INVALID_CREDENTIALS','用户名或密码错误',401);
+    const lockedUntil=Date.parse(row.login_locked_until||'');
+    if(Number.isFinite(lockedUntil)&&lockedUntil>Date.now()) fail('LOGIN_LOCKED','请联系系统管理员重置密码，或5分钟后再次尝试。',429);
+    if(!verifyPassword(password,row.password_hash)){
+      const failures=Number(row.failed_login_count||0)+1;
+      if(failures>=5){const lockUntil=new Date(Date.now()+5*60*1000).toISOString();db.prepare('UPDATE users SET failed_login_count=?,login_locked_until=? WHERE id=?').run(failures,lockUntil,row.id);fail('LOGIN_LOCKED','请联系系统管理员重置密码，或5分钟后再次尝试。',429);}
+      db.prepare('UPDATE users SET failed_login_count=? WHERE id=?').run(failures,row.id);fail('INVALID_CREDENTIALS','用户名或密码错误',401);
+    }
+    db.prepare("UPDATE users SET failed_login_count=0,login_locked_until='' WHERE id=?").run(row.id);
+    const token=createSession(row.id);return respond(res,200,{user:publicUser(user(row.id))},{'Set-Cookie':sessionCookie(token)});
+  }
+  const resolvedSession=sessionFromRequest(req);
+  if(req.method==='POST'&&pathname==='/api/auth/logout'){
+    if(resolvedSession)db.prepare('DELETE FROM sessions WHERE id=?').run(resolvedSession.session.id);
+    return respond(res,204,null,{'Set-Cookie':clearSessionCookie()});
+  }
+  const canUseDemoIdentity = Boolean(resolvedSession && isDemoIdentityUser(resolvedSession.row));
+  const actor=canUseDemoIdentity?getActor(req.headers['x-brms-demo-role'],req.headers['x-brms-demo-user-id']):resolvedSession?.actor;
+  if(!actor) return respond(res,401,{code:'UNAUTHENTICATED',message:'请先登录后再访问系统'});
+  if(req.method==='GET'&&pathname==='/api/me')return respond(res,200,{id:actor.id,name:actor.name,role:actor.key,label:actor.role,roles:actor.roles,canUseDemoIdentity,mustChangePassword:Boolean(resolvedSession.row.force_password_change),permissions:['requirements:read']});
+  if(req.method==='POST'&&pathname==='/api/auth/change-password'){
+    if(!resolvedSession) fail('UNAUTHENTICATED','请先登录后再操作',401);
+    const input=await body(req),currentPassword=String(input.currentPassword||''),newPassword=String(input.newPassword||'');
+    const currentUser=resolvedSession.row;
+    if(!verifyPassword(currentPassword,currentUser?.password_hash)) fail('INVALID_CREDENTIALS','当前密码不正确',401);
+    if(newPassword.length<8||newPassword.length>64) fail('VALIDATION_ERROR','新密码长度需为 8 至 64 个字符');
+    db.prepare("UPDATE users SET password_hash=?,password_updated_at=?,failed_login_count=0,login_locked_until='',force_password_change=0 WHERE id=?").run(passwordHash(newPassword),now(),currentUser.id);
+    db.prepare('DELETE FROM sessions WHERE user_id=?').run(currentUser.id);
+    const token=createSession(currentUser.id);return respond(res,200,{user:publicUser(user(currentUser.id))},{'Set-Cookie':sessionCookie(token)});
+  }
+  if(resolvedSession.row.force_password_change) fail('PASSWORD_CHANGE_REQUIRED','首次登录请先修改初始密码。',403);
   if(req.method==='POST'&&pathname==='/api/uploads/images')return respond(res,201,saveImageUpload(await body(req,7 * 1024 * 1024),actor));
   if(req.method==='GET'&&pathname==='/api/integrity/rich-text-assets'){requireRole(actor,['系统管理员']);return respond(res,200,assetIntegrityReport());}
   if(req.method==='GET'&&pathname==='/api/workbench')return respond(res,200,workbench(actor,url.searchParams.get('status')||''));
@@ -705,9 +814,9 @@ const server=http.createServer(async(req,res)=>{const url=new URL(req.url,`http:
   if(req.method==='POST'&&pathname==='/api/requirement-activities/read-all')return respond(res,200,readAllRequirementActivities(actor));
   const activityMatch=pathname.match(/^\/api\/requirement-activities\/([^/]+)\/read$/);if(activityMatch&&req.method==='POST')return respond(res,200,readRequirementActivity(activityMatch[1],actor));
   if(req.method==='GET'&&pathname==='/api/archives')return respond(res,200,archiveRequirements(actor,norm(url.searchParams.get('keyword'))));
-  if(pathname==='/api/users'&&req.method==='GET'){const keyword=norm(url.searchParams.get('keyword')).toLowerCase(),status=url.searchParams.get('status');return respond(res,200,db.prepare('SELECT * FROM users ORDER BY name').all().map(publicUser).filter(x=>(!keyword||`${x.name}${x.department}${x.roles.join(' ')}`.toLowerCase().includes(keyword))&&(!status||x.status===status)));}
+  if(pathname==='/api/users'&&req.method==='GET'){const keyword=norm(url.searchParams.get('keyword')).toLowerCase(),status=url.searchParams.get('status');return respond(res,200,db.prepare('SELECT * FROM users ORDER BY name').all().filter(row=>!isDemoIdentityUser(row)).map(publicUser).filter(x=>(!keyword||`${x.name}${x.department}${x.roles.join(' ')}`.toLowerCase().includes(keyword))&&(!status||x.status===status)));}
   if(pathname==='/api/users'&&req.method==='POST'){requireRole(actor,['系统管理员']);const x=await body(req),name=required(x.name,'请填写姓名'),department=required(x.department,'请填写部门'),selectedRoles=normalizedRoles(x.roles ?? x.role),initialPassword=temporaryPassword(),row={id:id(),name,department,role:selectedRoles[0],roles:JSON.stringify(selectedRoles),status:x.status==='停用'?'停用':'启用'};try{db.prepare('INSERT INTO users(id,name,name_normalized,department,role,status,roles,password_hash,password_updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)').run(row.id,row.name,norm(name).toLowerCase(),row.department,row.role,row.status,row.roles,passwordHash(initialPassword),now());}catch{fail('VALIDATION_ERROR','用户姓名不能重复');}return respond(res,201,{...publicUser(user(row.id)),initialPassword});}
-  const passwordResetMatch=pathname.match(/^\/api\/users\/([^/]+)\/password-reset$/);if(passwordResetMatch&&req.method==='POST'){requireRole(actor,['系统管理员']);const old=user(passwordResetMatch[1]);if(!old)fail('NOT_FOUND','用户不存在',404);const password=temporaryPassword();db.prepare('UPDATE users SET password_hash=?,password_updated_at=? WHERE id=?').run(passwordHash(password),now(),old.id);return respond(res,200,{id:old.id,name:old.name,password});}
+  const passwordResetMatch=pathname.match(/^\/api\/users\/([^/]+)\/password-reset$/);if(passwordResetMatch&&req.method==='POST'){requireRole(actor,['系统管理员']);const old=user(passwordResetMatch[1]);if(!old)fail('NOT_FOUND','用户不存在',404);const password=temporaryPassword();db.prepare("UPDATE users SET password_hash=?,password_updated_at=?,failed_login_count=0,login_locked_until='' WHERE id=?").run(passwordHash(password),now(),old.id);db.prepare('DELETE FROM sessions WHERE user_id=?').run(old.id);return respond(res,200,{id:old.id,name:old.name,password});}
   const userMatch=itemId(pathname,'users');if(userMatch&&req.method==='PATCH'){requireRole(actor,['系统管理员']);const old=user(userMatch[1]);if(!old)fail('NOT_FOUND','用户不存在',404);const x=await body(req),name=required(x.name??old.name,'请填写姓名'),department=required(x.department??old.department,'请填写部门'),selectedRoles=normalizedRoles(x.roles ?? x.role ?? userRoles(old));try{db.prepare('UPDATE users SET name=?,name_normalized=?,department=?,role=?,roles=?,status=? WHERE id=?').run(name,norm(name).toLowerCase(),department,selectedRoles[0],JSON.stringify(selectedRoles),x.status==='停用'?'停用':'启用',old.id);}catch{fail('VALIDATION_ERROR','用户姓名不能重复');}return respond(res,200,publicUser(user(old.id)));}if(userMatch&&req.method==='DELETE'){requireRole(actor,['系统管理员']);const old=user(userMatch[1]);if(!old)fail('NOT_FOUND','用户不存在',404);const used=db.prepare('SELECT payload FROM requirements').all().some(row=>{const payload=parse(row.payload);return payload.productOwnerId===old.id||payload.requesterOwnerId===old.id||payload.requester===old.name;});if(used)fail('USER_REFERENCED','该用户已被需求引用，不能删除');db.prepare('DELETE FROM users WHERE id=?').run(old.id);return respond(res,204);}
   if(pathname==='/api/projects'&&req.method==='GET')return respond(res,200,db.prepare('SELECT * FROM projects ORDER BY id ASC').all().map(publicProject));if(pathname==='/api/projects'&&req.method==='POST'){requireRole(actor,['系统管理员']);const x=await body(req),name=required(x.name,'请填写项目名称'),projectType=required(x.projectType,'请填写项目类型'),at=now(),projectId=id();try{db.prepare('INSERT INTO projects VALUES (?, ?, ?, ?, ?, ?, ?, ?)').run(projectId,name,norm(name).toLowerCase(),projectType,norm(x.description),x.status==='停用'?'停用':'启用',at,at);}catch{fail('PROJECT_NAME_CONFLICT','项目名称不能重复');}return respond(res,201,publicProject(project(projectId)));}
   const projectMatch=itemId(pathname,'projects');if(projectMatch&&req.method==='GET'){const old=project(projectMatch[1]);if(!old)fail('NOT_FOUND','项目不存在',404);return respond(res,200,publicProject(old));}if(projectMatch&&req.method==='PATCH'){requireRole(actor,['系统管理员']);const old=project(projectMatch[1]);if(!old)fail('NOT_FOUND','项目不存在',404);const x=await body(req),name=required(x.name??old.name,'请填写项目名称'),projectType=required(x.projectType??old.project_type,'请填写项目类型');try{db.prepare('UPDATE projects SET name=?,name_normalized=?,project_type=?,description=?,status=?,updated_at=? WHERE id=?').run(name,norm(name).toLowerCase(),projectType,norm(x.description??old.description),x.status==='停用'?'停用':'启用',now(),old.id);}catch{fail('PROJECT_NAME_CONFLICT','项目名称不能重复');}return respond(res,200,publicProject(project(old.id)));}if(projectMatch&&req.method==='DELETE'){requireRole(actor,['系统管理员']);const old=project(projectMatch[1]);if(!old)fail('NOT_FOUND','项目不存在',404);if(db.prepare('SELECT 1 FROM requirements WHERE project_id=? LIMIT 1').get(old.id)||db.prepare('SELECT 1 FROM project_versions WHERE project_id=? LIMIT 1').get(old.id))fail('PROJECT_REFERENCED','该项目已被业务需求或版本引用，不能删除');db.prepare('DELETE FROM projects WHERE id=?').run(old.id);return respond(res,204);}
