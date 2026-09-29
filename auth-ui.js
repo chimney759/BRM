@@ -1,5 +1,5 @@
 (() => {
-  const passwordInputs = new Set(['current-password', 'new-password', 'confirm-password', 'login-password']);
+  const passwordInputs = new Set(['current-password', 'new-password', 'confirm-password']);
 
   function toggle(input, button) {
     const visible = input.type === 'text';
@@ -29,6 +29,11 @@
   }
 
   function sync() {
+    document.querySelector('#login-password')?.closest('.password-control')?.replaceWith(document.querySelector('#login-password'));
+    document.querySelectorAll('.password-control').forEach(control => {
+      const toggles = [...control.querySelectorAll('.password-toggle')];
+      toggles.slice(1).forEach(toggle => toggle.remove());
+    });
     document.querySelectorAll('input[type="password"]').forEach(decoratePassword);
     if (document.querySelector('.login-page')) {
       document.querySelector('#account-drawer')?.remove();
