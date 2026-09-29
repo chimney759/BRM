@@ -97,6 +97,7 @@ test('users can hold multiple workflow roles while retaining a compatible primar
   assert.equal(created.response.status, 201);
   assert.deepEqual(created.payload.roles, ['业务需求方', '产品']);
   assert.equal(created.payload.role, '业务需求方');
+  assert.equal(created.payload.createdBy, '王敏');
   assert.match(created.payload.initialPassword, /^.{1,16}$/);
   assert.equal(Object.hasOwn(created.payload, 'passwordHash'), false);
 
@@ -387,8 +388,8 @@ test('API persists requirement data and enforces workflow, references, and permi
   assert.equal(protectedVersion.payload.code, 'PROJECT_VERSION_REFERENCED');
 
   const protectedProject = await request(`/api/projects/${project.payload.id}`, { method: 'DELETE' });
-  assert.equal(protectedProject.response.status, 422);
-  assert.equal(protectedProject.payload.code, 'PROJECT_REFERENCED');
+  assert.equal(protectedProject.response.status, 404);
+  assert.equal(protectedProject.payload.code, 'NOT_FOUND');
 
   const returnedRequirement = await request('/api/requirements', { method: 'POST', headers: { 'X-BRMS-Demo-Role': 'requester' }, body: JSON.stringify({ title: '退回后可直接排期的需求', source: '产品', projectId: project.payload.id, descriptionHtml: '<p>会议已经达成共识，仅需补充文字说明。</p>' }) });
   const returned = await request(`/api/requirements/${returnedRequirement.payload.id}/actions`, { method: 'POST', headers: { 'X-BRMS-Demo-Role': 'screener' }, body: JSON.stringify({ action: 'return', reason: '请补充边界说明', updatedAt: returnedRequirement.payload.updatedAt }) });
@@ -424,6 +425,7 @@ test('API generates requirement codes from arbitrary Chinese project names', asy
     body: JSON.stringify({ name: '会员增长业务', projectType: '导购电商', description: '' })
   });
   assert.equal(project.response.status, 201);
+  assert.equal(project.payload.createdBy, '王敏');
 
   const requirement = await request('/api/requirements', {
     method: 'POST',

@@ -47,14 +47,12 @@
     projects: {
       async list(filters = {}) { return listData(await request(`/projects${query(filters)}`)); },
       async get(id) { return request(`/projects/${encodeURIComponent(id)}`); },
-      async save(item) { return item.id ? request(`/projects/${encodeURIComponent(item.id)}`, { method: 'PATCH', body: JSON.stringify(item) }) : request('/projects', { method: 'POST', body: JSON.stringify(item) }); },
-      async remove(id) { return request(`/projects/${encodeURIComponent(id)}`, { method: 'DELETE' }); }
+      async save(item) { return item.id ? request(`/projects/${encodeURIComponent(item.id)}`, { method: 'PATCH', body: JSON.stringify(item) }) : request('/projects', { method: 'POST', body: JSON.stringify(item) }); }
     },
     users: {
       async list(filters = {}) { return listData(await request(`/users${query(filters)}`)); },
       async save(item) { return item.id ? request(`/users/${encodeURIComponent(item.id)}`, { method: 'PATCH', body: JSON.stringify(item) }) : request('/users', { method: 'POST', body: JSON.stringify(item) }); },
       async resetPassword(id) { return request(`/users/${encodeURIComponent(id)}/password-reset`, { method: 'POST' }); },
-      async remove(id) { return request(`/users/${encodeURIComponent(id)}`, { method: 'DELETE' }); },
       async find(name) { return (await this.list({ keyword: name, status: '启用' })).find((item) => item.name === name); }
     },
     versions: {

@@ -9,8 +9,8 @@
 - `GET /api/me`：返回当前用户、角色、权限。
 - `GET /api/workbench?status=`：返回当前身份的待办工作台聚合数据 `{ cards, activeStatus, total, items }`。`cards` 由服务端按角色授权计算，`items` 直接复用业务需求实体字段、按更新时间倒序且最多返回 5 条；`status` 只能为当前身份可见的待办分类，越权时返回 `FORBIDDEN`。页面展示字段、状态与节点均以该接口和需求详情接口为准，前端不得自行计算待办数量或角色可见范围。
 - `GET /api/archives?keyword=`：返回由服务端按“已手动归档，或完成发布且发布日期已满六个月”规则筛出的归档数据 `{ cutoff, total, groupCount, items }`；`items` 已按项目和版本完成编组。业务需求方只能获取其本人发起或归属的归档需求，其他角色按授权范围返回。
-- `GET|POST /api/users`、`PATCH|DELETE /api/users/{id}`：用户配置；用户被需求引用时删除返回 `USER_REFERENCED`。
-- `GET|POST /api/projects`、`GET|PATCH|DELETE /api/projects/{id}`：项目配置；项目名称去首尾空白后全局唯一，重复时返回 `PROJECT_NAME_CONFLICT`；项目被需求引用时删除返回 `PROJECT_REFERENCED`。
+- `GET|POST /api/users`、`PATCH /api/users/{id}`：用户配置。创建用户时，服务端依据当前登录操作者写入并返回 `createdBy`；创建人不可编辑。用户不提供删除接口。
+- `GET|POST /api/projects`、`GET|PATCH /api/projects/{id}`：项目配置；项目名称去首尾空白后全局唯一，重复时返回 `PROJECT_NAME_CONFLICT`。创建项目时，服务端依据当前登录操作者写入并返回 `createdBy`；创建人不可编辑。项目不提供删除接口。
 - `GET|POST /api/project-versions`、`GET|PATCH|DELETE /api/project-versions/{id}`：项目版本管理。创建及更新必须携带 `projectId`、`version`、`releaseDate`；同一项目下版本号唯一。已被需求以 `projectId + version` 关联的版本不可删除。
 - 需求进入“产品设计”时，客户端通过项目版本列表按 `projectId` 查询版本并支持版本号搜索；状态动作请求必须提交该项目下存在的 `version`，服务端返回并持久化对应的 `releaseDate`。
 - `GET /api/requirements?keyword=&projectId=&status=&source=&requesterOwnerId=&createdFrom=&createdTo=&sortBy=&sortOrder=&page=&pageSize=`：需求列表。筛选、排序和身份可见范围必须由服务端执行；业务需求方仅能读取本人发起或归属的需求。
